@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher, types, F
@@ -10,6 +9,7 @@ from aiogram.client.default import DefaultBotProperties
 import aiosqlite
 from datetime import datetime, timedelta
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, FSInputFile
 
 TOKEN = "7018906512:AAGkf9ugaxGh8qS18QBhpV-BP47aPqrnt9A"
 ADMIN_ID = 7029037184
@@ -45,8 +45,10 @@ async def get_main_menu_kb(user_id: int):
 
 period_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="1 мес"), KeyboardButton(text="3 мес")],
-        [KeyboardButton(text="6 мес"), KeyboardButton(text="12 мес")],
+        [KeyboardButton(text="1 мес 1.344 руб."),
+         KeyboardButton(text="3 мес 3.744 руб.")],
+        [KeyboardButton(text="6 мес 6.994 руб."),
+         KeyboardButton(text="12 мес +мес. подарок 13.444 руб.")],
         [KeyboardButton(text="⬅️ Назад")]
     ],
     resize_keyboard=True
@@ -68,24 +70,60 @@ admin_menu_kb = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True
 )
-
 @dp.message(F.text == "/start")
 async def start(message: Message, state: FSMContext):
-    kb = await get_main_menu_kb(message.from_user.id)
-    await message.answer("""📚 <b>Клуб “Диалог Истины”</b>
+    await state.clear()
+    video_note = FSInputFile("video_note.mp4")  # Укажи путь к видео файлу
 
-✔️ Правильно практиковать религию  
-✔️ Передавать знания  
-✔️ Получать дополнительный доход
+    # Отправляем video_note (круглое видео-сообщение)
+    await bot.send_video_note(chat_id=message.chat.id, video_note=video_note)
 
-💰 <b>Подписка:</b>  
-1 мес – 1344₽  
-3 мес – 3744₽  
-6 мес – 6994₽  
-12 мес – 13444₽ + 1 мес в подарок
+    # Отправляем кнопку "Далее"
+    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Далее ➡️")]], resize_keyboard=True)
+    await message.answer("Нажмите 'Далее', чтобы продолжить.", reply_markup=kb)
 
-Выберите действие ниже.
-""", reply_markup=kb)
+@dp.message(F.text == "Далее ➡️")
+async def send_intro(message: Message):
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Подробнее об обучении")],
+            [KeyboardButton(text="Хочу в клуб")]
+        ],
+        resize_keyboard=True
+    )
+
+    photo = FSInputFile("aysha_photo.jpg")  # Укажи путь к фото
+
+    text = (
+        "Айша Эскерханова - Религиозный учитель\n\n"
+        "✅ 15 лет преподавания ислама: Санкт-Петербург, Ярославль, Грозный, Ингушетия, Дагестан и другие;\n"
+        "✅ Окончила Исламский техникум, обучаюсь в Исламском университете имени Кунта-Хаджи (Грозный), обучалась у шейхов\n"
+        "✅ Обучила более 10.000 женщин и детей из разных стран, 100+ приняли Ислам\n\n"
+        "Клуб «Диалог Истины» — место, где вы получите полноценное обучение во всех сферах необходимых для жизни:\n"
+        "✅ Фард знания\n"
+        "✅ Семья. Обязанности мужа и жены.\n"
+        "✅ Воспитание детей;\n"
+        "✅ Женские темы: месячные, роды и после родов, хиджаб, косметика;\n"
+        "✅ Торговые отношения, закят;\n"
+        "✅ Хадж\n\n"
+        "Формат обучения:\n"
+        "📍 После подписки вам открывается доступ на GetCourse, где в свободном доступе сразу начинаете самостоятельно учиться.\n"
+        "📍 Попадаете на канал в телеграмме, где можно общаться со всеми учениками;\n"
+        "📍 В течение месяца проводятся прямые эфиры на самые актуальные темы\n\n"
+        "🕌 С каждой подписки мы откладываем 30% в копилку на строительство мечети. Каждый из вас может стать частью этого благого дела!"
+    )
+
+    await message.answer_photo(photo=photo, caption=text, reply_markup=kb)
+
+@dp.message(F.text == "Подробнее об обучении")
+async def send_details_link(message: Message):
+    DETAILS_URL = "https://example.com/education"  # Здесь замени на свою ссылку
+    await message.answer(f"Подробнее об обучении смотрите здесь:\n{DETAILS_URL}")
+
+@dp.message(F.text == "Хочу в клуб")
+async def start_subscription(message: Message, state: FSMContext):
+    # Здесь вызывается твоя существующая функция для оформления подписки
+    await subscribe(message, state)
 
 @dp.message(F.text == "ℹ️ Информация о курсе")
 async def info_course(message: Message):
@@ -103,13 +141,22 @@ async def subscribe(message: Message, state: FSMContext):
     async with aiosqlite.connect("users.db") as db:
         async with db.execute("SELECT end_date FROM users WHERE user_id = ?", (message.from_user.id,)) as cursor:
             row = await cursor.fetchone()
-            if row:
-                end_date = datetime.fromisoformat(row[0])
-                if end_date > datetime.now():
-                    days_left = (end_date - datetime.now()).days
-                    kb = await get_main_menu_kb(message.from_user.id)
-                    await message.answer(f"У вас уже есть активная подписка, осталось {days_left} дней.\n\nВ Личном кабинете вы можете посмотреть детали.", reply_markup=kb)
-                    return
+            end_date = None
+            if row and row[0]:
+                try:
+                    end_date = datetime.fromisoformat(str(row[0]))
+                except Exception:
+                    pass
+
+            if end_date and end_date > datetime.now():
+                days_left = (end_date - datetime.now()).days
+                kb = await get_main_menu_kb(message.from_user.id)
+                await message.answer(
+                    f"У вас уже есть активная подписка, осталось {days_left} дней.\n\nВ Личном кабинете вы можете посмотреть детали.",
+                    reply_markup=kb
+                )
+                return
+
     await message.answer("⏳ На сколько месяцев оформить подписку?", reply_markup=period_kb)
     await state.set_state(SubscribeSteps.choosing_period)
 
@@ -121,7 +168,7 @@ async def get_period(message: Message, state: FSMContext):
         await message.answer("Отменено. Возврат в главное меню.", reply_markup=kb)
         return
     period = message.text
-    if period not in ["1 мес", "3 мес", "6 мес", "12 мес"]:
+    if period not in ["1 мес 1.344 руб.", "3 мес 3.744 руб.", "6 мес 6.994 руб.", "12 мес +мес. подарок 13.444 руб."]:
         await message.answer("Пожалуйста, выберите период из кнопок.", reply_markup=period_kb)
         return
     await state.update_data(period=period)
@@ -224,6 +271,23 @@ async def handle_payment(message: Message, state: FSMContext):
 )
         except Exception as e:
             print(f"Ошибка отправки админу {admin_id}: {e}")
+
+        # Сохраняем введённые данные временно в БД до подтверждения
+    async with aiosqlite.connect("users.db") as db:
+        await db.execute(
+            "REPLACE INTO users (user_id, end_date, username, email, fullname, phone, city) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                message.from_user.id,
+                "",  # пустой срок окончания — пока не подтверждено
+                username,
+                data['email'],
+                data['fullname'],
+                data['phone'],
+                data['city']
+            )
+        )
+        await db.commit()
+
     await state.clear()
 
 
@@ -231,6 +295,7 @@ async def handle_payment(message: Message, state: FSMContext):
 async def approve_payment(message: Message):
     if message.from_user.id not in ADMINS:
         return
+
     parts = message.text.split("_")
     user_id = int(parts[1])
     period_text = "_".join(parts[2:])
@@ -244,32 +309,40 @@ async def approve_payment(message: Message):
     except Exception:
         username = ""
 
+    now = datetime.now()
+
     async with aiosqlite.connect("users.db") as db:
+        # Безопасно получаем end_date
         async with db.execute("SELECT end_date FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
-            now = datetime.now()
-            if row:
-                current_end = datetime.fromisoformat(row[0])
-                if current_end > now:
-                    new_end = current_end + timedelta(days=30 * months)
-                else:
-                    new_end = now + timedelta(days=30 * months)
+            if row and row[0]:  # Проверяем, что строка не пустая
+                try:
+                    current_end = datetime.fromisoformat(row[0])
+                except ValueError:
+                    current_end = None
             else:
-                new_end = now + timedelta(days=30 * months)
-            await db.execute(
-                "REPLACE INTO users (user_id, end_date, username) VALUES (?, ?, ?)",
-                (user_id, new_end.isoformat(), username)
-            )
-            await db.commit()
+                current_end = None
 
-    # Обработка разбана и создания ссылки отдельно с обработкой ошибок
+        # Рассчитываем новую дату окончания
+        if current_end > now:
+            new_end = current_end + timedelta(days=30 * months)
+        else:
+            new_end = now + timedelta(days=30 * months)
+
+        # Обновляем или добавляем пользователя
+        await db.execute(
+            "REPLACE INTO users (user_id, end_date, username) VALUES (?, ?, ?)",
+            (user_id, new_end.isoformat(), username)
+        )
+        await db.commit()
+
+    # Разбан
     try:
         await bot.unban_chat_member(GROUP_ID, user_id)
     except Exception as e:
-        # Не всегда можно разбанить (например, если пользователь не в бане)
-        # Можно логировать или просто игнорировать
-        print(f"Warning: не удалось разбанить пользователя {user_id}: {e}")
+        print(f"⚠️ Не удалось разбанить пользователя {user_id}: {e}")
 
+    # Ссылка-приглашение
     try:
         invite_link = await bot.create_chat_invite_link(
             chat_id=GROUP_ID,
@@ -282,21 +355,25 @@ async def approve_payment(message: Message):
         await bot.send_message(ADMIN_ID, f"Ошибка при создании ссылки для пользователя {user_id}: {e}")
         return
 
+    # Отправка пользователю
     try:
         await bot.send_message(
             user_id,
             f"✅ Оплата подтверждена администратором <b>{approver_name}</b>!\n"
-            f"Вот ваша ссылка на группу:\n{invite_link.invite_link}"
+            f"Вот ваша ссылка на группу:\n{invite_link.invite_link}",
+            parse_mode="HTML"
         )
     except Exception as e:
         await bot.send_message(ADMIN_ID, f"Ошибка при отправке ссылки пользователю {user_id}: {e}")
 
+    # Уведомление другим админам
     for admin_id in ADMINS:
         if admin_id != message.from_user.id:
             try:
                 await bot.send_message(
                     admin_id,
-                    f"✅ Подписка подтверждена админом <b>{approver_name}</b> для ID {user_id}"
+                    f"✅ Подписка подтверждена админом <b>{approver_name}</b> для ID {user_id}",
+                    parse_mode="HTML"
                 )
             except Exception:
                 pass
@@ -483,19 +560,26 @@ async def manual_add_days(message: Message, state: FSMContext):
     now = datetime.now()
     new_end = now + timedelta(days=days)
 
+    # Загружаем старые данные, если они есть
     async with aiosqlite.connect("users.db") as db:
+        async with db.execute("SELECT email, fullname, phone, city FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            email, fullname, phone, city = ("", "", "", "")
+            if row:
+                email, fullname, phone, city = row
+
         await db.execute(
-    "REPLACE INTO users (user_id, end_date, username, email, fullname, phone, city) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    (
-        user_id,
-        new_end.isoformat(),
-        username,
-        data.get("email", ""),
-        data.get("fullname", ""),
-        data.get("phone", ""),
-        data.get("city", "")
-    )
-)
+            "REPLACE INTO users (user_id, end_date, username, email, fullname, phone, city) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                user_id,
+                new_end.isoformat(),
+                username,
+                email,
+                fullname,
+                phone,
+                city
+            )
+        )
         await db.commit()
 
     try:
@@ -524,19 +608,19 @@ async def manual_add_days(message: Message, state: FSMContext):
 
 def get_price(period_text: str) -> int:
     prices = {
-        "1 мес": 1344,
-        "3 мес": 3744,
-        "6 мес": 6994,
-        "12 мес": 13444,
+        "1 мес 1.344 руб.": 1344,
+        "3 мес 3.744 руб.": 3744,
+        "6 мес 6.994 руб.": 6994,
+        "12 мес +мес. подарок 13.444 руб.": 13444,
     }
     return prices.get(period_text, 0)
 
 def get_months_by_text(period_text: str) -> int:
     mapping = {
-        "1 мес": 1,
-        "3 мес": 3,
-        "6 мес": 6,
-        "12 мес": 12,
+        "1 мес 1.344 руб.": 1,
+        "3 мес 3.744 руб.": 3,
+        "6 мес 6.994 руб.": 6,
+        "12 мес +мес. подарок 13.444 руб.": 13,
     }
     return mapping.get(period_text, 0)
 
@@ -545,7 +629,7 @@ async def approve_callback(call: CallbackQuery):
     if call.from_user.id not in ADMINS:
         return await call.answer("У вас нет доступа.", show_alert=True)
 
-    data = call.data.split(":")[1]  # формат: approve:user_id:period
+    data = call.data.split(":")[1]  # формат: approve:user_id|period
     try:
         user_id_str, period = data.split("|")
         user_id = int(user_id_str)
@@ -556,23 +640,46 @@ async def approve_callback(call: CallbackQuery):
     now = datetime.now()
 
     async with aiosqlite.connect("users.db") as db:
+        # Получаем текущую дату окончания, если есть
         async with db.execute("SELECT end_date FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
-            if row:
-                current_end = datetime.fromisoformat(row[0])
-                if current_end > now:
-                    new_end = current_end + timedelta(days=30 * months)
-                else:
-                    new_end = now + timedelta(days=30 * months)
+            now = datetime.now()
+            if row and row[0]:
+                try:
+                    current_end = datetime.fromisoformat(row[0])
+                except Exception:
+                    current_end = now
+            else:
+                current_end = now
+
+            if current_end > now:
+                new_end = current_end + timedelta(days=30 * months)
             else:
                 new_end = now + timedelta(days=30 * months)
 
+        # Получаем все остальные поля (если есть)
+        async with db.execute("SELECT email, fullname, phone, city FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                email, fullname, phone, city = row
+            else:
+                email = fullname = phone = city = ""
+
+        # Получаем username
+        try:
+            user = await bot.get_chat(user_id)
+            username = user.username or user.full_name
+        except:
+            username = ""
+
+        # Обновляем или добавляем запись
         await db.execute(
-            "REPLACE INTO users (user_id, end_date, username) VALUES (?, ?, ?)",
-            (user_id, new_end.isoformat(), "",)  # username можно позже обновить
+            "REPLACE INTO users (user_id, end_date, username, email, fullname, phone, city) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, new_end.isoformat(), username, email, fullname, phone, city)
         )
         await db.commit()
 
+    # Теперь продолжаем с логикой: разбан, ссылка и отправка
     try:
         await bot.unban_chat_member(GROUP_ID, user_id)
         invite_link = await bot.create_chat_invite_link(
@@ -581,7 +688,18 @@ async def approve_callback(call: CallbackQuery):
             expire_date=datetime.now() + timedelta(days=1),
             member_limit=1
         )
-        await bot.send_message(user_id, f"✅ Ваша подписка подтверждена!\nСсылка на группу: {invite_link.invite_link}")
+        await bot.send_message(
+            user_id,
+            f"""✅ Вы получили доступ к клубу <b>«Диалог Истины»</b>!
+
+1. Обязательно подпишитесь на канал — <a href="{invite_link.invite_link}">вот ссылка</a>. Здесь проходят прямые эфиры, а также вы общаетесь с другими учениками и преподавателями клуба.
+
+2. На почту вам пришёл доступ на платформу GetCourse.
+
+3. Если возникли проблемы или сложности — сразу обратитесь в тех.поддержку: <a href="https://wa.me/79001234567">написать в WhatsApp</a>.
+""",
+            parse_mode="HTML"
+        )
         await call.message.reply(f"✅ Подписка подтверждена для пользователя {user_id}")
     except Exception as e:
         await bot.send_message(ADMIN_ID, f"Ошибка при выдаче ссылки для {user_id}: {e}")
