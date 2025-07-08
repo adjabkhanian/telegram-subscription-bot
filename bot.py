@@ -117,7 +117,7 @@ async def send_intro(message: Message):
 
 @dp.message(F.text == "Подробнее об обучении")
 async def send_details_link(message: Message):
-    DETAILS_URL = "https://example.com/education"  # Здесь замени на свою ссылку
+    DETAILS_URL = "https://dialogistini.ru/iclub"  # Здесь замени на свою ссылку
     await message.answer(f"Подробнее об обучении смотрите здесь:\n{DETAILS_URL}")
 
 @dp.message(F.text == "Хочу в клуб")
@@ -696,7 +696,7 @@ async def approve_callback(call: CallbackQuery):
 
 2. На почту вам пришёл доступ на платформу GetCourse.
 
-3. Если возникли проблемы или сложности — сразу обратитесь в тех.поддержку: <a href="https://wa.me/79001234567">написать в WhatsApp</a>.
+3. Если возникли проблемы или сложности — сразу обратитесь в тех.поддержку: <a href="https://wa.me/79380244802">написать в WhatsApp</a>.
 """,
             parse_mode="HTML"
         )
