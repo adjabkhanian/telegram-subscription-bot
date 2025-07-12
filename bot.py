@@ -1,20 +1,30 @@
-import asyncio
 import logging
+import asyncio
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
-import aiosqlite
 from datetime import datetime, timedelta
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, FSInputFile
+from pyairtable import Api
+from datetime import timezone
 
 TOKEN = "7018906512:AAGkf9ugaxGh8qS18QBhpV-BP47aPqrnt9A"
 ADMIN_ID = 7029037184
 GROUP_ID = -1002858230612
 ADMINS = [7029037184, 1391901108]  # список Telegram ID админов
+
+# Конфигурация Airtable
+AIRTABLE_API_KEY = 'patR5ePq6DfwMWknr.798939b3dff4003934788bab3afc96caef64b951a44b82282ea38f2d85866d62'  # Найти в Airtable API docs
+AIRTABLE_BASE_ID = 'app4OuxtRjXGQCNQx'  # Из URL вашей базы
+AIRTABLE_TABLE_NAME = 'dialog-istini'
+
+# Инициализация Airtable
+airtable = Api(AIRTABLE_API_KEY)
+users_table = airtable.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher(storage=MemoryStorage())
@@ -32,15 +42,68 @@ class SubscribeSteps(StatesGroup):
     admin_manual_add_id = State()
     admin_manual_add_username = State()
     admin_manual_add_days = State()
+    getting_email_trial = State()
+
+async def get_user(user_id: int):
+    """Получить данные пользователя из Airtable"""
+    records = users_table.all(formula=f"{{user_id}} = {user_id}")
+    return records[0] if records else None
+
+async def update_user(user_id: int, fields: dict):
+    """Обновить или создать запись пользователя"""
+    record = await get_user(user_id)
+    if record:
+        users_table.update(record['id'], fields)
+    else:
+        users_table.create({'user_id': user_id, **fields})
+
+async def check_trial_used(user_id: int) -> bool:
+    """Проверяет, использовал ли пользователь пробный период (через Airtable)"""
+    record = users_table.first(formula=f"{{user_id}} = {user_id}")
+    if record and "end_date" in record["fields"]:
+        end_date = datetime.fromisoformat(record["fields"]["end_date"]).astimezone()
+        return end_date > datetime.now().astimezone()
+    return False
 
 async def get_main_menu_kb(user_id: int):
     buttons = [
         [KeyboardButton(text="ℹ️ Информация о курсе")],
-        [KeyboardButton(text="💳 Оформить подписку")],
-        [KeyboardButton(text="👤 Личный кабинет")]
     ]
+
+    # Проверяем, есть ли активная подписка
+    record = users_table.first(formula=f"{{user_id}} = {user_id}")
+    now = datetime.now().astimezone()
+
+    show_trial = True
+    show_renew = False
+
+    if record:
+        fields = record.get("fields", {})
+        end_date_str = fields.get("end_date")
+        if end_date_str:
+            try:
+                end_date = datetime.fromisoformat(end_date_str).astimezone()
+                if end_date > now:
+                    show_trial = False  # Уже есть подписка
+                    show_renew = True   # Можно продлить
+            except:
+                pass
+        if fields.get("trial_used", False):
+            show_trial = False
+
+    if show_trial:
+        buttons.append([KeyboardButton(text="🆓 Пробный период (5 дней)")])
+
+    buttons.append([KeyboardButton(text="💳 Оформить подписку")])
+
+    if show_renew:
+        buttons.append([KeyboardButton(text="🔁 Продлить подписку")])
+
+    buttons.append([KeyboardButton(text="👤 Личный кабинет")])
+
     if user_id in ADMINS:
         buttons.append([KeyboardButton(text="🛠️ Админ-меню")])
+
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 period_kb = ReplyKeyboardMarkup(
@@ -82,6 +145,10 @@ async def start(message: Message, state: FSMContext):
     kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Далее ➡️")]], resize_keyboard=True)
     await message.answer("Нажмите 'Далее', чтобы продолжить.", reply_markup=kb)
 
+@dp.message(F.text == "🔁 Продлить подписку")
+async def renew_subscription(message: Message, state: FSMContext):
+    await subscribe(message, state)
+
 @dp.message(F.text == "Далее ➡️")
 async def send_intro(message: Message):
     kb = ReplyKeyboardMarkup(
@@ -117,13 +184,25 @@ async def send_intro(message: Message):
 
 @dp.message(F.text == "Подробнее об обучении")
 async def send_details_link(message: Message):
-    DETAILS_URL = "https://dialogistini.ru/iclub"  # Здесь замени на свою ссылку
+    DETAILS_URL = "https://example.com/education"  # Здесь замени на свою ссылку
     await message.answer(f"Подробнее об обучении смотрите здесь:\n{DETAILS_URL}")
 
 @dp.message(F.text == "Хочу в клуб")
 async def start_subscription(message: Message, state: FSMContext):
-    # Здесь вызывается твоя существующая функция для оформления подписки
-    await subscribe(message, state)
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="💳 Оформить подписку")],
+            [KeyboardButton(text="🆓 Пробный период (5 дней)")],
+            [KeyboardButton(text="⬅️ Назад")]
+        ],
+        resize_keyboard=True
+    )
+    await message.answer(
+        "Выберите способ подключения к обучению:\n"
+        "💳 Полная подписка — откроет доступ ко всем урокам, чату и эфиру\n"
+        "🆓 Пробный период — 5 дней бесплатного доступа\n",
+        reply_markup=kb
+    )
 
 @dp.message(F.text == "ℹ️ Информация о курсе")
 async def info_course(message: Message):
@@ -138,27 +217,56 @@ async def back_to_main(message: Message, state: FSMContext):
 
 @dp.message(F.text == "💳 Оформить подписку")
 async def subscribe(message: Message, state: FSMContext):
-    async with aiosqlite.connect("users.db") as db:
-        async with db.execute("SELECT end_date FROM users WHERE user_id = ?", (message.from_user.id,)) as cursor:
-            row = await cursor.fetchone()
-            end_date = None
-            if row and row[0]:
-                try:
-                    end_date = datetime.fromisoformat(str(row[0]))
-                except Exception:
-                    pass
-
-            if end_date and end_date > datetime.now():
-                days_left = (end_date - datetime.now()).days
-                kb = await get_main_menu_kb(message.from_user.id)
-                await message.answer(
-                    f"У вас уже есть активная подписка, осталось {days_left} дней.\n\nВ Личном кабинете вы можете посмотреть детали.",
-                    reply_markup=kb
-                )
-                return
-
+    # Проверяем активную подписку через Airtable
+    record = users_table.first(formula=f"{{user_id}} = {message.from_user.id}")
+    
+    # if record and 'end_date' in record['fields']:
+    #     end_date = datetime.fromisoformat(record['fields']['end_date'])
+    #     # Делаем обе даты aware (с часовым поясом)
+    #     now = datetime.now().astimezone()  # Добавляем текущий часовой пояс
+    #     end_date = end_date.astimezone()  # Добавляем часовой пояс к end_date
+    #     if end_date > now:
+    #         days_left = (end_date - now).days
+    #         kb = await get_main_menu_kb(message.from_user.id)
+    #         await message.answer(
+    #             f"У вас уже есть активная подписка, осталось {days_left} дней.",
+    #             reply_markup=kb
+    #         )
+    #         return
+    
     await message.answer("⏳ На сколько месяцев оформить подписку?", reply_markup=period_kb)
     await state.set_state(SubscribeSteps.choosing_period)
+
+@dp.message(F.text == "🆓 Пробный период (5 дней)")
+async def start_trial(message: Message, state: FSMContext):
+    record = users_table.first(formula=f"{{user_id}} = {message.from_user.id}")
+    
+    if record and record['fields'].get('trial_used', False):
+        await message.answer("❌ Вы уже использовали пробный период")
+        return
+    
+    await message.answer("📧 Введите email для активации пробного периода:")
+    await state.set_state(SubscribeSteps.getting_email_trial)
+
+# @dp.message(SubscribeSteps.getting_email_trial)
+# async def process_trial_email(message: Message, state: FSMContext):
+#     email = message.text.strip()
+#     # Делаем дату aware
+#     trial_end = (datetime.now() + timedelta(days=5)).astimezone()
+    
+#     users_table.create({
+#         'user_id': message.from_user.id,
+#         'email': email,
+#         'end_date': trial_end.isoformat(),
+#         'trial_used': True,
+#         'username': message.from_user.username or ""
+#     })
+    
+#     await message.answer(
+#         f"🎉 Пробный период активирован до {trial_end.strftime('%d.%m.%Y')}",
+#         reply_markup=await get_main_menu_kb(message.from_user.id)
+#     )
+#     await state.clear()
 
 @dp.message(SubscribeSteps.choosing_period)
 async def get_period(message: Message, state: FSMContext):
@@ -273,20 +381,20 @@ async def handle_payment(message: Message, state: FSMContext):
             print(f"Ошибка отправки админу {admin_id}: {e}")
 
         # Сохраняем введённые данные временно в БД до подтверждения
-    async with aiosqlite.connect("users.db") as db:
-        await db.execute(
-            "REPLACE INTO users (user_id, end_date, username, email, fullname, phone, city) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                message.from_user.id,
-                "",  # пустой срок окончания — пока не подтверждено
-                username,
-                data['email'],
-                data['fullname'],
-                data['phone'],
-                data['city']
-            )
-        )
-        await db.commit()
+    record = users_table.first(formula=f"{{user_id}} = {message.from_user.id}")
+    fields = {
+        'user_id': message.from_user.id,
+        'username': username,
+        'email': data['email'],
+        'fullname': data['fullname'],
+        'phone': data['phone'],
+        'city': data['city'],
+        'status': 'pending'
+    }
+    if record:
+        users_table.update(record["id"], fields)
+    else:
+        users_table.create(fields)
 
     await state.clear()
 
@@ -309,32 +417,29 @@ async def approve_payment(message: Message):
     except Exception:
         username = ""
 
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
 
-    async with aiosqlite.connect("users.db") as db:
-        # Безопасно получаем end_date
-        async with db.execute("SELECT end_date FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            if row and row[0]:  # Проверяем, что строка не пустая
-                try:
-                    current_end = datetime.fromisoformat(row[0])
-                except ValueError:
-                    current_end = None
-            else:
-                current_end = None
+    record = users_table.first(formula=f"{{user_id}} = {user_id}")
+    fields = record['fields'] if record else {}
+    record_id = record['id'] if record else None
 
-        # Рассчитываем новую дату окончания
-        if current_end > now:
-            new_end = current_end + timedelta(days=30 * months)
-        else:
-            new_end = now + timedelta(days=30 * months)
+    current_end = None
+    if "end_date" in fields:
+        try:
+            current_end = datetime.fromisoformat(fields["end_date"])
+        except Exception:
+            pass
 
-        # Обновляем или добавляем пользователя
-        await db.execute(
-            "REPLACE INTO users (user_id, end_date, username) VALUES (?, ?, ?)",
-            (user_id, new_end.isoformat(), username)
-        )
-        await db.commit()
+    now = datetime.now(timezone.utc)
+    if current_end and current_end > now:
+        new_end = current_end + timedelta(days=30 * months)
+    else:
+        new_end = now + timedelta(days=30 * months)
+
+    users_table.update(record_id, {
+        "end_date": new_end.isoformat(),
+        "username": username
+    })
 
     # Разбан
     try:
@@ -388,20 +493,25 @@ async def deny_payment(message: Message):
 
 @dp.message(F.text == "👤 Личный кабинет")
 async def profile(message: Message):
-    async with aiosqlite.connect("users.db") as db:
-        async with db.execute("SELECT end_date FROM users WHERE user_id = ?", (message.from_user.id,)) as cursor:
-            row = await cursor.fetchone()
-            kb = await get_main_menu_kb(message.from_user.id)
-            if row:
-                end_date = datetime.fromisoformat(row[0])
-                now = datetime.now()
-                if end_date > now:
-                    days_left = (end_date - now).days
-                    await message.answer(f"👤 <b>Ваш профиль</b>\nПодписка до: {end_date.strftime('%d.%m.%Y')}\nОсталось дней: {days_left}", reply_markup=kb)
-                else:
-                    await message.answer("Ваша подписка истекла. Оформите новую подписку.", reply_markup=kb)
-            else:
-                await message.answer("У вас нет активной подписки. Оформите подписку.", reply_markup=kb)
+    record = users_table.first(formula=f"{{user_id}} = {message.from_user.id}")
+    kb = await get_main_menu_kb(message.from_user.id)
+    
+    if record and 'end_date' in record['fields']:
+        fields = record.get("fields", {})
+        end_date = datetime.fromisoformat(fields["end_date"])
+        now = datetime.now(timezone.utc)
+        if end_date > now:
+            days_left = (end_date - now).days
+            status = "🔹 Пробный период" if days_left <= 5 else "🔹 Полная подписка"
+            await message.answer(
+                f"👤 Ваш профиль\n{status}\n"
+                f"📆 До: {end_date.strftime('%d.%m.%Y')}\n"
+                f"⏳ Осталось дней: {days_left}",
+                reply_markup=kb
+            )
+            return
+    
+    await message.answer("У вас нет активной подписки.", reply_markup=kb)
 
 @dp.message(F.text == "🛠️ Админ-меню")
 async def admin_menu(message: Message, state: FSMContext):
@@ -414,28 +524,38 @@ async def admin_menu(message: Message, state: FSMContext):
 async def list_subscribers(message: Message):
     if message.from_user.id not in ADMINS:
         return
-    async with aiosqlite.connect("users.db") as db:
-        async with db.execute("SELECT user_id, end_date, username, email, fullname, phone, city FROM users ORDER BY end_date DESC") as cursor:
-            rows = await cursor.fetchall()
-            if not rows:
-                await message.answer("Подписчиков пока нет.", reply_markup=admin_menu_kb)
-                return
-            text = "<b>Список подписчиков:</b>\n\n"
-            for user_id, end_date_str, username, email, fullname, phone, city in rows:
-                username_display = f"@{username}" if username else "(без username)"
-                text += (
-                    f"<b>{username_display}</b> — ID: <code>{user_id}</code>\n"
-                    f"📧 Email: {email or '-'}\n"
-                    f"🪪 ФИО: {fullname or '-'}\n"
-                    f"📞 Телефон: {phone or '-'}\n"
-                    f"🏙️ Город: {city or '-'}\n"
-                    f"📆 До: {datetime.fromisoformat(end_date_str).strftime('%d.%m.%Y')}\n\n"
-                )
-                if len(text) > 3500:
-                    await message.answer(text, parse_mode="HTML")
-                    text = ""
-            if text:
-                await message.answer(text, reply_markup=admin_menu_kb, parse_mode="HTML")
+
+    records = users_table.all()
+    if not records:
+        await message.answer("Список пуст.")
+        return
+
+    text = "<b>Список подписчиков:</b>\n\n"
+    
+    for record in records:
+        f = record.get("fields", {})
+        user_id = f.get("user_id", "N/A")
+        username = f.get("username", "")
+        fullname = f.get("fullname", "")
+        phone = f.get("phone", "")
+        city = f.get("city", "")
+        email = f.get("email", "")
+        end_date = f.get("end_date", "N/A")
+
+        # username как ссылка на Telegram
+        username_display = f'<a href="https://t.me/{username}">@{username}</a>' if username else "—"
+
+        text += (
+            f"<b>🆔 ID:</b> <code>{user_id}</code>\n"
+            f"<b>👤 Username:</b> {username_display}\n"
+            f"<b>📛 ФИО:</b> {fullname}\n"
+            f"<b>📞 Телефон:</b> {phone}\n"
+            f"<b>🏙️ Город:</b> {city}\n"
+            f"<b>📧 Email:</b> {email}\n"
+            f"<b>📆 До:</b> {end_date}\n\n"
+        )
+
+    await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
 
 @dp.message(F.text == "🔄 Аннулировать подписку")
 async def cancel_subscribe_start(message: Message, state: FSMContext):
@@ -455,9 +575,9 @@ async def cancel_subscribe_process(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("Пожалуйста, введите корректный числовой ID или 'отмена'.")
         return
-    async with aiosqlite.connect("users.db") as db:
-        await db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
-        await db.commit()
+    record = users_table.first(formula=f"{{user_id}} = {user_id}")
+    if record:
+        users_table.delete(record["id"])
     await bot.ban_chat_member(GROUP_ID, user_id)
     await message.answer(f"Подписка пользователя {user_id} аннулирована и он исключён из группы.", reply_markup=admin_menu_kb)
     await state.clear()
@@ -472,16 +592,17 @@ async def notify_all_subscribers(message: Message, state: FSMContext):
 @dp.message(SubscribeSteps.admin_broadcast)
 async def process_broadcast(message: Message, state: FSMContext):
     text = message.text
-    async with aiosqlite.connect("users.db") as db:
-        async with db.execute("SELECT user_id FROM users") as cursor:
-            rows = await cursor.fetchall()
-            success, failed = 0, 0
-            for (user_id,) in rows:
-                try:
-                    await bot.send_message(user_id, f"📢 {text}")
-                    success += 1
-                except:
-                    failed += 1
+    records = users_table.all()
+    success, failed = 0, 0
+
+    for record in records:
+        user_id = record["fields"].get("user_id")
+        if user_id:
+            try:
+                await bot.send_message(user_id, f"📢 {text}")
+                success += 1
+            except:
+                failed += 1
     await message.answer(f"📬 Рассылка завершена.\n✅ Успешно: {success}\n❌ Ошибок: {failed}")
     await state.clear()
 
@@ -495,14 +616,15 @@ async def start_search_username(message: Message, state: FSMContext):
 @dp.message(SubscribeSteps.admin_search)
 async def process_search_username(message: Message, state: FSMContext):
     username_to_find = message.text.lower().strip().lstrip("@")
-    async with aiosqlite.connect("users.db") as db:
-        async with db.execute("SELECT user_id, end_date, username FROM users WHERE LOWER(username) = ?", (username_to_find,)) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                user_id, end_date, username = row
-                await message.answer(f"👤 Найден пользователь @{username}:\nID: {user_id}\nПодписка до: {end_date}")
-            else:
-                await message.answer("Пользователь не найден.")
+    record = users_table.first(formula=f"LOWER({{username}}) = '{username_to_find}'")
+    if record:
+        fields = record["fields"]
+        user_id = fields.get("user_id", "N/A")
+        end_date = fields.get("end_date", "N/A")
+        username = fields.get("username", "N/A")
+        await message.answer(f"👤 Найден пользователь @{username}:\nID: {user_id}\nПодписка до: {end_date}")
+    else:
+        await message.answer("Пользователь не найден.")
     await state.clear()
 
 @dp.message(F.text == "➕ Добавить подписчика вручную")
@@ -540,6 +662,85 @@ async def manual_add_username(message: Message, state: FSMContext):
     await state.set_state(SubscribeSteps.admin_manual_add_days)
     await message.answer("Введите период подписки в днях (целое число, например, 28).")
 
+@dp.message(SubscribeSteps.getting_email_trial)
+async def process_trial_email(message: Message, state: FSMContext):
+    if message.text == "⬅️ Назад":
+        await state.clear()
+        kb = await get_main_menu_kb(message.from_user.id)
+        await message.answer("Отменено. Возврат в главное меню.", reply_markup=kb)
+        return
+    
+    email = message.text.strip()
+    username = message.from_user.username or message.from_user.full_name
+    
+    # Активируем пробный период
+    trial_end = datetime.now() + timedelta(days=5)
+    
+    record = users_table.first(formula=f"{{user_id}} = {message.from_user.id}")
+    if record:
+        users_table.update(record["id"], {
+            "end_date": trial_end.isoformat(),
+            "username": username,
+            "email": email,
+            "trial_used": True
+        })
+    else:
+        users_table.create({
+            "user_id": message.from_user.id,
+            "end_date": trial_end.isoformat(),
+            "username": username,
+            "email": email,
+            "trial_used": True
+        })
+    
+    # Даем доступ в группу
+    try:
+        await bot.unban_chat_member(GROUP_ID, message.from_user.id)
+        invite_link = await bot.create_chat_invite_link(
+            chat_id=GROUP_ID,
+            name=f"Trial for {message.from_user.id}",
+            expire_date=trial_end,
+            member_limit=1
+        )
+        
+        await message.answer(
+            f"""🎉 Вам активирован пробный период на 5 дней!
+            
+Доступ будет активен до {trial_end.strftime('%d.%m.%Y')}.
+
+Вот ваша ссылка для вступления в группу:
+{invite_link.invite_link}
+
+После окончания пробного периода вы можете оформить полную подписку.""",
+            reply_markup=await get_main_menu_kb(message.from_user.id)
+        )
+        
+        # Уведомляем админов
+        for admin_id in ADMINS:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    f"🆕 Новый пробный период:\n"
+                    f"👤 @{username}\n"
+                    f"🆔 {message.from_user.id}\n"
+                    f"📧 {email}\n"
+                    f"📆 До: {trial_end.strftime('%d.%m.%Y')}"
+                )
+            except Exception:
+                pass
+                
+    except Exception as e:
+        await message.answer(
+            "Произошла ошибка при создании ссылки. Администратор уже уведомлен.",
+            reply_markup=await get_main_menu_kb(message.from_user.id)
+        )
+        await bot.send_message(
+            ADMIN_ID,
+            f"Ошибка при активации пробного периода для {message.from_user.id}:\n{e}"
+        )
+    
+    await state.clear()
+
 @dp.message(SubscribeSteps.admin_manual_add_days)
 async def manual_add_days(message: Message, state: FSMContext):
     if message.text.lower() == "отмена":
@@ -557,30 +758,22 @@ async def manual_add_days(message: Message, state: FSMContext):
     data = await state.get_data()
     user_id = data.get("manual_user_id")
     username = data.get("manual_username")
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     new_end = now + timedelta(days=days)
 
     # Загружаем старые данные, если они есть
-    async with aiosqlite.connect("users.db") as db:
-        async with db.execute("SELECT email, fullname, phone, city FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            email, fullname, phone, city = ("", "", "", "")
-            if row:
-                email, fullname, phone, city = row
+    record = users_table.first(formula=f"{{user_id}} = {user_id}")
+    fields = record["fields"] if record else {}
 
-        await db.execute(
-            "REPLACE INTO users (user_id, end_date, username, email, fullname, phone, city) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                user_id,
-                new_end.isoformat(),
-                username,
-                email,
-                fullname,
-                phone,
-                city
-            )
-        )
-        await db.commit()
+    users_table.update(record["id"] if record else None, {
+        "user_id": user_id,
+        "end_date": new_end.isoformat(),
+        "username": username,
+        "email": fields.get("email", ""),
+        "fullname": fields.get("fullname", ""),
+        "phone": fields.get("phone", ""),
+        "city": fields.get("city", "")
+    })
 
     try:
         await bot.unban_chat_member(GROUP_ID, user_id)
@@ -637,47 +830,35 @@ async def approve_callback(call: CallbackQuery):
         return await call.answer("Некорректные данные.", show_alert=True)
 
     months = get_months_by_text(period)
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
 
-    async with aiosqlite.connect("users.db") as db:
-        # Получаем текущую дату окончания, если есть
-        async with db.execute("SELECT end_date FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            now = datetime.now()
-            if row and row[0]:
-                try:
-                    current_end = datetime.fromisoformat(row[0])
-                except Exception:
-                    current_end = now
-            else:
-                current_end = now
+    # 🧠 ЗАМЕНА SQLite → Airtable:
+    record = users_table.first(formula=f"{{user_id}} = {user_id}")
+    fields = record["fields"] if record else {}
+    record_id = record["id"] if record else None
 
-            if current_end > now:
-                new_end = current_end + timedelta(days=30 * months)
-            else:
-                new_end = now + timedelta(days=30 * months)
+    current_end = None
+    try:
+        if "end_date" in fields:
+            current_end = datetime.fromisoformat(fields["end_date"])
+    except:
+        current_end = None
 
-        # Получаем все остальные поля (если есть)
-        async with db.execute("SELECT email, fullname, phone, city FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                email, fullname, phone, city = row
-            else:
-                email = fullname = phone = city = ""
+    if current_end and current_end > now:
+        new_end = current_end + timedelta(days=30 * months)
+    else:
+        new_end = now + timedelta(days=30 * months)
 
-        # Получаем username
-        try:
-            user = await bot.get_chat(user_id)
-            username = user.username or user.full_name
-        except:
-            username = ""
+    users_table.update(record_id, {
+        "user_id": user_id,
+        "username": call.from_user.username or "",
+        "email": fields.get("email", ""),
+        "fullname": fields.get("fullname", ""),
+        "phone": fields.get("phone", ""),
+        "city": fields.get("city", ""),
+        "end_date": new_end.isoformat()
+    })
 
-        # Обновляем или добавляем запись
-        await db.execute(
-            "REPLACE INTO users (user_id, end_date, username, email, fullname, phone, city) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (user_id, new_end.isoformat(), username, email, fullname, phone, city)
-        )
-        await db.commit()
 
     # Теперь продолжаем с логикой: разбан, ссылка и отправка
     try:
@@ -696,7 +877,7 @@ async def approve_callback(call: CallbackQuery):
 
 2. На почту вам пришёл доступ на платформу GetCourse.
 
-3. Если возникли проблемы или сложности — сразу обратитесь в тех.поддержку: <a href="https://wa.me/79380244802">написать в WhatsApp</a>.
+3. Если возникли проблемы или сложности — сразу обратитесь в тех.поддержку: <a href="https://wa.me/79001234567">написать в WhatsApp</a>.
 """,
             parse_mode="HTML"
         )
@@ -706,6 +887,26 @@ async def approve_callback(call: CallbackQuery):
         await call.message.reply(f"Произошла ошибка: {e}")
 
     await call.answer("Подтверждено.")
+
+@dp.message(F.text == "🆓 Пробный период (5 дней)")
+async def start_trial(message: Message, state: FSMContext):
+    async with aiosqlite.connect("users.db") as db:
+        # Проверяем, есть ли уже подписка (включая пробную)
+        async with db.execute("SELECT end_date FROM users WHERE user_id = ?", (message.from_user.id,)) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0]:
+                end_date = datetime.fromisoformat(row[0])
+                if end_date > datetime.now().astimezone():
+                    kb = await get_main_menu_kb(message.from_user.id)
+                    await message.answer(
+                        "У вас уже есть активная подписка или пробный период.",
+                        reply_markup=kb
+                    )
+                    return
+
+    # Запрашиваем email для пробного периода
+    await message.answer("📧 Введите ваш email для активации пробного периода:", reply_markup=cancel_kb)
+    await state.set_state(SubscribeSteps.getting_email_trial)
 
 @dp.callback_query(F.data.startswith("deny:"))
 async def deny_callback(call: CallbackQuery):
@@ -724,33 +925,67 @@ async def deny_callback(call: CallbackQuery):
     await call.answer("Отклонено.")
 
 async def on_startup():
-    async with aiosqlite.connect("users.db") as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                end_date TEXT,
-                username TEXT,
-                email TEXT,
-                fullname TEXT,
-                phone TEXT,
-                city TEXT
-            )
-        """)
-        # Добавим недостающие колонки, если база уже существовала без них
-        for column in ["email", "fullname", "phone", "city"]:
+    # Проверяем подключение к Airtable
+    try:
+        test_records = users_table.all(max_records=1)
+        print("Airtable connection successful")
+    except Exception as e:
+        print(f"Airtable connection error: {e}")
+        raise
+
+# ... (после всех хэндлеров, например после @dp.callback_query(F.data.startswith("deny:"))  
+
+async def check_trial_periods():
+    while True:
+        now = datetime.now().astimezone()
+        records = users_table.all()
+
+        for record in records:
+            fields = record.get("fields", {})
+            user_id = fields.get("user_id")
+            end_date_str = fields.get("end_date")
+
+            if not user_id or not end_date_str:
+                continue
+
             try:
-                await db.execute(f"ALTER TABLE users ADD COLUMN {column} TEXT")
-            except aiosqlite.OperationalError:
-                # Колонка уже есть — просто пропускаем ошибку
-                pass
-        await db.commit()
+                end_date = datetime.fromisoformat(end_date_str).astimezone()
+            except:
+                continue
+
+            # Если подписка закончилась
+            if end_date < now:
+                try:
+                    await bot.ban_chat_member(GROUP_ID, user_id)
+                    await bot.unban_chat_member(GROUP_ID, user_id)
+                    print(f"⛔ Пользователь {user_id} удалён из группы (подписка закончилась)")
+                except Exception as e:
+                    print(f"⚠️ Не удалось удалить {user_id}: {e}")
+            # Если заканчивается сегодня
+            elif (end_date.date() - now.date()).days == 0:
+                try:
+                    await bot.send_message(
+                        user_id,
+                        "⚠️ Ваш доступ заканчивается сегодня!\n"
+                        "Чтобы продолжить обучение, оформите полную подписку через меню бота."
+                    )
+                except Exception as e:
+                    print(f"⚠️ Не удалось уведомить {user_id}: {e}")
+
+        await asyncio.sleep(6 * 60 * 60)  # каждые 6 часов
+
+# Далее идет функция main() и остальное...
 
 async def main():
     import logging
     logging.basicConfig(level=logging.INFO)
 
-    await on_startup()  # если есть функция для инициализации
-    await dp.start_polling(bot)
+    await on_startup()  # инициализация базы данных
+
+    # +++ Вот эту строку добавляем! +++
+    asyncio.create_task(check_trial_periods())  # Запуск фоновой проверки пробных периодов
+
+    await dp.start_polling(bot)  # Старт бота
 
 if __name__ == "__main__":
     asyncio.run(main())
