@@ -15,7 +15,7 @@ from datetime import timezone
 TOKEN = "7018906512:AAGkf9ugaxGh8qS18QBhpV-BP47aPqrnt9A"
 ADMIN_ID = 7029037184
 GROUP_ID = -1002858230612
-ADMINS = [7029037184, 1391901108]  # список Telegram ID админов
+ADMINS = [7029037184, 1391901108, 989906193]  # список Telegram ID админов
 
 # Конфигурация Airtable
 AIRTABLE_API_KEY = 'patR5ePq6DfwMWknr.798939b3dff4003934788bab3afc96caef64b951a44b82282ea38f2d85866d62'  # Найти в Airtable API docs
@@ -28,6 +28,7 @@ users_table = airtable.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher(storage=MemoryStorage())
+
 
 class SubscribeSteps(StatesGroup):
     choosing_period = State()
@@ -239,34 +240,51 @@ async def subscribe(message: Message, state: FSMContext):
 
 @dp.message(F.text == "🆓 Пробный период (5 дней)")
 async def start_trial(message: Message, state: FSMContext):
-    record = users_table.first(formula=f"{{user_id}} = {message.from_user.id}")
-    
-    if record and record['fields'].get('trial_used', False):
+    user_id = message.from_user.id
+    username = message.from_user.username or message.from_user.full_name
+
+    record = users_table.first(formula=f"{{user_id}} = {user_id}")
+    fields = record["fields"] if record else {}
+
+    # Проверка: если уже использовал пробник
+    if fields.get("trial_used", False):
         await message.answer("❌ Вы уже использовали пробный период")
         return
-    
-    await message.answer("📧 Введите email для активации пробного периода:")
-    await state.set_state(SubscribeSteps.getting_email_trial)
 
-# @dp.message(SubscribeSteps.getting_email_trial)
-# async def process_trial_email(message: Message, state: FSMContext):
-#     email = message.text.strip()
-#     # Делаем дату aware
-#     trial_end = (datetime.now() + timedelta(days=5)).astimezone()
-    
-#     users_table.create({
-#         'user_id': message.from_user.id,
-#         'email': email,
-#         'end_date': trial_end.isoformat(),
-#         'trial_used': True,
-#         'username': message.from_user.username or ""
-#     })
-    
-#     await message.answer(
-#         f"🎉 Пробный период активирован до {trial_end.strftime('%d.%m.%Y')}",
-#         reply_markup=await get_main_menu_kb(message.from_user.id)
-#     )
-#     await state.clear()
+    # Проверка: все ли данные есть
+    required_fields = ["email", "fullname", "phone", "city"]
+    missing_fields = [field for field in required_fields if not fields.get(field)]
+
+    if not missing_fields:
+        # Всё есть — активируем пробник сразу
+        await activate_trial(
+            message=message,
+            email=fields["email"],
+            username=username,
+            full_name=fields.get("fullname", ""),
+            phone=fields.get("phone", ""),
+            city=fields.get("city", "")
+        )
+
+        return
+
+    # Данных не хватает — начинаем опрашивать
+    await state.update_data(missing_fields=missing_fields, username=username)
+
+    next_field = missing_fields[0]
+    if next_field == "email":
+        await message.answer("📧 Введите ваш email:", reply_markup=cancel_kb)
+        await state.set_state(SubscribeSteps.getting_email_trial)
+    elif next_field == "fullname":
+        await message.answer("✍️ Введите ваше <b>ФИО</b>:", reply_markup=cancel_kb)
+        await state.set_state(SubscribeSteps.getting_fullname)
+    elif next_field == "phone":
+        await message.answer("📱 Введите ваш номер телефона:", reply_markup=cancel_kb)
+        await state.set_state(SubscribeSteps.getting_phone)
+    elif next_field == "city":
+        await message.answer("🏙️ Введите ваш город:", reply_markup=cancel_kb)
+        await state.set_state(SubscribeSteps.getting_city)
+
 
 @dp.message(SubscribeSteps.choosing_period)
 async def get_period(message: Message, state: FSMContext):
@@ -314,13 +332,32 @@ async def get_phone(message: Message, state: FSMContext):
         kb = await get_main_menu_kb(message.from_user.id)
         await message.answer("Отменено. Возврат в главное меню.", reply_markup=kb)
         return
+
     phone = message.text.strip()
     await state.update_data(phone=phone)
     data = await state.get_data()
-    period = data["period"]
-    await state.update_data(phone=phone)
-    await message.answer("🏙️ Введите ваш <b>город</b>:", reply_markup=cancel_kb)
-    await state.set_state(SubscribeSteps.getting_city)
+
+    period = data.get("period")  # 🛡️ безопасно достаём
+
+    if period:
+        # Это платная подписка
+        await message.answer("🏙️ Введите ваш <b>город</b>:", reply_markup=cancel_kb)
+        await state.set_state(SubscribeSteps.getting_city)
+    else:
+        # Это пробный путь
+        missing_fields = data.get("missing_fields", [])
+        if "phone" in missing_fields:
+            missing_fields.remove("phone")
+        await state.update_data(missing_fields=missing_fields)
+
+        if "city" in missing_fields:
+            await message.answer("🏙️ Введите ваш город:", reply_markup=cancel_kb)
+            await state.set_state(SubscribeSteps.getting_city)
+        else:
+            username = data.get("username") or message.from_user.username or message.from_user.full_name
+            await activate_trial(message, data.get("email"), username)
+            await state.clear()
+
 
 @dp.message(SubscribeSteps.getting_city)
 async def get_city(message: Message, state: FSMContext):
@@ -329,19 +366,43 @@ async def get_city(message: Message, state: FSMContext):
         kb = await get_main_menu_kb(message.from_user.id)
         await message.answer("Отменено. Возврат в главное меню.", reply_markup=kb)
         return
+
     city = message.text.strip()
     await state.update_data(city=city)
 
     data = await state.get_data()
-    period = data["period"]
-    await message.answer(f"""✅ Отлично!
+    period = data.get("period")
+
+    if period:
+        # Это платная подписка
+        await message.answer(
+            f"""✅ Отлично!
 Переведите <b>{get_price(period)}₽</b> на карту:
 
 <code>2204 3203 6606 1564 (Озон банк, Алёна Александровна Добыко)</code>
 
 После оплаты пришлите сюда скриншот чека.
-""", reply_markup=cancel_kb)
-    await state.set_state(SubscribeSteps.waiting_payment)
+""",
+            reply_markup=cancel_kb
+        )
+        await state.set_state(SubscribeSteps.waiting_payment)
+    else:
+        username = data.get("username") or message.from_user.username or message.from_user.full_name
+        await activate_trial(
+            message=message,
+            email=data.get("email"),
+            username=username,
+            full_name=data.get("full_name"),
+            phone=data.get("phone"),
+            city=city
+        )
+
+
+
+
+        await state.clear()
+
+
 
 @dp.message(SubscribeSteps.waiting_payment, F.photo)
 async def handle_payment(message: Message, state: FSMContext):
@@ -351,6 +412,9 @@ async def handle_payment(message: Message, state: FSMContext):
     await message.answer("⏳ Ожидайте подтверждение от администратора.", reply_markup=kb)
     for admin_id in ADMINS:
         try:
+
+            short_period_code = get_months_by_text(data['period'])
+
             await bot.send_photo(
     admin_id,
     photo=message.photo[-1].file_id,
@@ -368,7 +432,7 @@ async def handle_payment(message: Message, state: FSMContext):
         [
             InlineKeyboardButton(
                 text="✅ Одобрить",
-                callback_data=f"approve:{message.from_user.id}|{data['period']}"
+                callback_data=f"approve:{message.from_user.id}|{short_period_code}"
             ),
             InlineKeyboardButton(
                 text="❌ Отклонить",
@@ -531,7 +595,8 @@ async def list_subscribers(message: Message):
         return
 
     text = "<b>Список подписчиков:</b>\n\n"
-    
+    chunks = []
+
     for record in records:
         f = record.get("fields", {})
         user_id = f.get("user_id", "N/A")
@@ -542,10 +607,9 @@ async def list_subscribers(message: Message):
         email = f.get("email", "")
         end_date = f.get("end_date", "N/A")
 
-        # username как ссылка на Telegram
         username_display = f'<a href="https://t.me/{username}">@{username}</a>' if username else "—"
 
-        text += (
+        entry = (
             f"<b>🆔 ID:</b> <code>{user_id}</code>\n"
             f"<b>👤 Username:</b> {username_display}\n"
             f"<b>📛 ФИО:</b> {fullname}\n"
@@ -555,7 +619,18 @@ async def list_subscribers(message: Message):
             f"<b>📆 До:</b> {end_date}\n\n"
         )
 
-    await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
+        if len(text) + len(entry) > 4000:
+            chunks.append(text)
+            text = ""
+        text += entry
+
+    if text:
+        chunks.append(text)
+
+    # Отправляем все части
+    for chunk in chunks:
+        await message.answer(chunk, parse_mode="HTML", disable_web_page_preview=True)
+
 
 @dp.message(F.text == "🔄 Аннулировать подписку")
 async def cancel_subscribe_start(message: Message, state: FSMContext):
@@ -669,77 +744,50 @@ async def process_trial_email(message: Message, state: FSMContext):
         kb = await get_main_menu_kb(message.from_user.id)
         await message.answer("Отменено. Возврат в главное меню.", reply_markup=kb)
         return
-    
+
     email = message.text.strip()
-    username = message.from_user.username or message.from_user.full_name
-    
-    # Активируем пробный период
-    trial_end = datetime.now() + timedelta(days=5)
-    
-    record = users_table.first(formula=f"{{user_id}} = {message.from_user.id}")
-    if record:
-        users_table.update(record["id"], {
-            "end_date": trial_end.isoformat(),
-            "username": username,
-            "email": email,
-            "trial_used": True
-        })
+    await state.update_data(email=email)
+
+    user_id = message.from_user.id
+    record = users_table.first(formula=f"{{user_id}} = {user_id}")
+    fields = record["fields"] if record else {}
+
+    # Собираем недостающие поля (уже с учетом введенного email)
+    missing_fields = []
+    if not fields.get("fullname"):
+        missing_fields.append("fullname")
+    if not fields.get("phone"):
+        missing_fields.append("phone")
+    if not fields.get("city"):
+        missing_fields.append("city")
+
+    # Если всё есть — сразу активируем
+    if not missing_fields:
+        username = message.from_user.username or message.from_user.full_name
+        await activate_trial(
+            message=message,
+            email=email,
+            username=username,
+            full_name=fields.get("fullname", ""),
+            phone=fields.get("phone", ""),
+            city=fields.get("city", "")
+        )
+
+        await state.clear()
     else:
-        users_table.create({
-            "user_id": message.from_user.id,
-            "end_date": trial_end.isoformat(),
-            "username": username,
-            "email": email,
-            "trial_used": True
-        })
-    
-    # Даем доступ в группу
-    try:
-        await bot.unban_chat_member(GROUP_ID, message.from_user.id)
-        invite_link = await bot.create_chat_invite_link(
-            chat_id=GROUP_ID,
-            name=f"Trial for {message.from_user.id}",
-            expire_date=trial_end,
-            member_limit=1
-        )
-        
-        await message.answer(
-            f"""🎉 Вам активирован пробный период на 5 дней!
-            
-Доступ будет активен до {trial_end.strftime('%d.%m.%Y')}.
+        await state.update_data(missing_fields=missing_fields)
 
-Вот ваша ссылка для вступления в группу:
-{invite_link.invite_link}
-
-После окончания пробного периода вы можете оформить полную подписку.""",
-            reply_markup=await get_main_menu_kb(message.from_user.id)
-        )
-        
-        # Уведомляем админов
-        for admin_id in ADMINS:
-            try:
-                await bot.send_message(
-                    admin_id,
-                    f"🆕 Новый пробный период:\n"
-                    f"👤 @{username}\n"
-                    f"🆔 {message.from_user.id}\n"
-                    f"📧 {email}\n"
-                    f"📆 До: {trial_end.strftime('%d.%m.%Y')}"
-                )
-            except Exception:
-                pass
-                
-    except Exception as e:
-        await message.answer(
-            "Произошла ошибка при создании ссылки. Администратор уже уведомлен.",
-            reply_markup=await get_main_menu_kb(message.from_user.id)
-        )
-        await bot.send_message(
-            ADMIN_ID,
-            f"Ошибка при активации пробного периода для {message.from_user.id}:\n{e}"
-        )
-    
-    await state.clear()
+        # Переходим к следующему шагу
+        next_field = missing_fields[0]
+        if next_field == "fullname":
+            await message.answer("✍️ Введите ваше <b>ФИО</b>:", reply_markup=cancel_kb)
+            await state.set_state(SubscribeSteps.getting_fullname)
+        elif next_field == "phone":
+            await message.answer("📱 Введите ваш номер телефона:", reply_markup=cancel_kb)
+            await state.set_state(SubscribeSteps.getting_phone)
+        elif next_field == "city":
+            await message.answer("🏙️ Введите ваш город:", reply_markup=cancel_kb)
+            await state.set_state(SubscribeSteps.getting_city)
 
 @dp.message(SubscribeSteps.admin_manual_add_days)
 async def manual_add_days(message: Message, state: FSMContext):
@@ -822,14 +870,14 @@ async def approve_callback(call: CallbackQuery):
     if call.from_user.id not in ADMINS:
         return await call.answer("У вас нет доступа.", show_alert=True)
 
-    data = call.data.split(":")[1]  # формат: approve:user_id|period
+    data = call.data.split(":")[1]  # формат: approve:user_id|months
     try:
-        user_id_str, period = data.split("|")
+        user_id_str, months_str = data.split("|")
         user_id = int(user_id_str)
+        months = int(months_str)
     except Exception:
         return await call.answer("Некорректные данные.", show_alert=True)
 
-    months = get_months_by_text(period)
     now = datetime.now(timezone.utc)
 
     # 🧠 ЗАМЕНА SQLite → Airtable:
@@ -934,6 +982,58 @@ async def on_startup():
         raise
 
 # ... (после всех хэндлеров, например после @dp.callback_query(F.data.startswith("deny:"))  
+
+async def activate_trial(message: Message, email: str, username: str, full_name: str, phone: str, city: str):
+    user_id = message.from_user.id
+    now = datetime.now(timezone.utc)
+    trial_days = 5
+    end_date = (now + timedelta(days=trial_days)).isoformat()
+
+    fields = {
+        "user_id": user_id,
+        "username": username,
+        "email": email,
+        "fullname": full_name,
+        "phone": phone,
+        "city": city,
+        "end_date": end_date,
+        "trial_used": True
+    }
+
+    try:
+        record = users_table.first(formula=f"{{user_id}} = {user_id}")
+        if record:
+            users_table.update(record["id"], fields)
+        else:
+            users_table.create(fields)
+
+        await bot.unban_chat_member(GROUP_ID, user_id)
+
+        invite_link = await bot.create_chat_invite_link(
+            chat_id=GROUP_ID,
+            name=f"Trial link for {user_id}",
+            expire_date=datetime.now() + timedelta(days=1),
+            member_limit=1
+        )
+
+        await bot.send_message(
+            message.chat.id,
+            f"""✅ Готово!
+Вы получили пробный доступ на {trial_days} дней.
+
+🔗 <b>Вот ваша одноразовая ссылка для входа в группу:</b>
+{invite_link.invite_link}
+
+⚠️ Ссылка действует 24 часа и только для одного входа.
+""",
+            parse_mode="HTML",
+            reply_markup=await get_main_menu_kb(user_id)
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при активации пробного периода:\n<code>{e}</code>")
+
+
+
 
 async def check_trial_periods():
     while True:
