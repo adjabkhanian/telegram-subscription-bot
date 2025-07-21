@@ -930,6 +930,17 @@ async def approve_callback(call: CallbackQuery):
             parse_mode="HTML"
         )
         await call.message.reply(f"✅ Подписка подтверждена для пользователя {user_id}")
+        # Уведомление другим админам
+        for admin_id in ADMINS:
+            if admin_id != call.from_user.id:
+                try:
+                    await bot.send_message(
+                        admin_id,
+                        f"✅ Подписка для пользователя <code>{user_id}</code> подтверждена админом <b>{call.from_user.full_name}</b>.",
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    print(f"❗ Не удалось уведомить админа {admin_id}: {e}")
     except Exception as e:
         await bot.send_message(ADMIN_ID, f"Ошибка при выдаче ссылки для {user_id}: {e}")
         await call.message.reply(f"Произошла ошибка: {e}")
