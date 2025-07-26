@@ -11,9 +11,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQu
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, FSInputFile
 from pyairtable import Api
 from datetime import timezone
-import os
 
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = "7018906512:AAH2RGDJaoZ3ib8B0zC-9B5Wr5Q14a4slZY"
 ADMIN_ID = 7029037184
 GROUP_ID = -1002858230612
 ADMINS = [7029037184, 1391901108, 989906193]  # список Telegram ID админов
