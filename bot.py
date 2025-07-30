@@ -12,7 +12,7 @@ from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, FSInputFile
 from pyairtable import Api
 from datetime import timezone
 
-TOKEN = "7018906512:AAH2RGDJaoZ3ib8B0zC-9B5Wr5Q14a4slZY"
+TOKEN = "7018906512:AAGIZv1bbvOdabOwimN6F7kNmwZMqPQqqJo"
 ADMIN_ID = 7029037184
 GROUP_ID = -1002858230612
 ADMINS = [7029037184, 1391901108, 989906193]  # список Telegram ID админов
